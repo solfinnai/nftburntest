@@ -1,0 +1,128 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mint &amp; Swap</title>
+    <style>
+      :root {
+        --bg: #0d0f12;
+        --panel: #161a20;
+        --line: #262c35;
+        --text: #e9edf2;
+        --muted: #8c96a3;
+        --accent: #c3f53c;
+        --accent-ink: #11140a;
+        --danger: #ff6b5b;
+        --radius: 14px;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--text);
+        font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+      }
+      main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 140px; }
+      header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
+      h1 { margin: 0; font-size: 24px; letter-spacing: -0.01em; }
+      h2 { margin: 0 0 4px; font-size: 18px; }
+      .muted { color: var(--muted); }
+      .badge { font-size: 12px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); }
+      .badge.on { color: var(--accent); border-color: var(--accent); }
+      button {
+        font: inherit; cursor: pointer; border-radius: 10px; border: 1px solid var(--line);
+        background: var(--panel); color: var(--text); padding: 9px 16px;
+      }
+      button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
+      button.danger { background: var(--danger); color: #1a0703; border-color: var(--danger); font-weight: 600; }
+      button:disabled { opacity: 0.45; cursor: not-allowed; }
+      section { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-top: 18px; }
+      .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
+      .stat b { display: block; font-size: 22px; }
+      .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; margin-top: 12px; }
+      .card {
+        padding: 0; overflow: hidden; text-align: left; border-radius: 12px; background: #0f1216;
+        display: flex; flex-direction: column;
+      }
+      .card .art { aspect-ratio: 1; width: 100%; background: #1c2128 center/cover no-repeat; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
+      .card .label { padding: 6px 8px; font-size: 13px; }
+      .card[aria-pressed="true"] { outline: 3px solid var(--accent); outline-offset: -3px; }
+      .card.burn[aria-pressed="true"] { outline-color: var(--danger); }
+      input[type="search"], input[type="number"] {
+        font: inherit; color: var(--text); background: #0f1216; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
+      }
+      input[type="number"] { width: 80px; }
+      #swapbar {
+        position: fixed; left: 0; right: 0; bottom: 0; background: #11151a; border-top: 1px solid var(--line);
+        padding: 14px 16px; display: none;
+      }
+      #swapbar .inner { max-width: 1100px; margin: 0 auto; display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+      #toast { margin-top: 12px; min-height: 1.5em; }
+      #toast.error { color: var(--danger); }
+      a { color: var(--accent); }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1 id="title">Loading…</h1>
+          <div class="row muted">
+            <span id="network"></span>
+            <span class="badge" id="mintBadge">mint closed</span>
+            <span class="badge" id="swapBadge">swap closed</span>
+          </div>
+        </div>
+        <button id="connect" class="primary">Connect wallet</button>
+      </header>
+
+      <div id="toast" role="status" aria-live="polite"></div>
+
+      <section>
+        <div class="stats">
+          <div class="stat"><span class="muted">Free minted</span><b id="statMinted">-</b></div>
+          <div class="stat"><span class="muted">Unminted pool</span><b id="statPool">-</b></div>
+          <div class="stat"><span class="muted">Burned in swaps</span><b id="statBurned">-</b></div>
+          <div class="stat"><span class="muted">Live supply</span><b id="statSupply">-</b></div>
+        </div>
+      </section>
+
+      <section>
+        <h2>Free mint</h2>
+        <p class="muted" id="mintHelp">You get random PFPs from the unminted pool. Only gas, no price.</p>
+        <div class="row">
+          <input type="number" id="qty" min="1" value="1" aria-label="Quantity" />
+          <button id="mintBtn" class="primary" disabled>Mint</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>1. Pick one of yours to burn</h2>
+        <p class="muted">Burning is permanent. The burned PFP is gone for good and never returns to the pool.</p>
+        <div class="grid" id="owned"></div>
+      </section>
+
+      <section>
+        <div class="row" style="justify-content: space-between">
+          <div>
+            <h2>2. Pick an unminted one to claim</h2>
+            <p class="muted" style="margin: 0">These have never been minted. First come, first served.</p>
+          </div>
+          <input type="search" id="search" placeholder="Find # id" aria-label="Find token id" />
+        </div>
+        <div class="grid" id="pool"></div>
+      </section>
+    </main>
+
+    <div id="swapbar">
+      <div class="inner">
+        <span id="swapText"></span>
+        <button id="swapBtn" class="danger">Burn &amp; swap</button>
+      </div>
+    </div>
+
+    <script type="module" src="./app.js"></script>
+  </body>
+</html>
