@@ -1,16 +1,16 @@
 # Burn & Swap PFP
 
-A 555 piece PFP collection for [Robinhood Chain](https://docs.robinhood.com/chain/) with a free mint and a burn-to-swap mechanic:
+A 555 piece PFP collection for [Robinhood Chain](https://docs.robinhood.com/chain/) with a free mint and a random burn-to-swap:
 
-1. **Free mint.** Anyone can mint for free (gas only). Each mint hands out a random token from the pool of unminted tokens.
-2. **Burn & swap.** A holder burns a token they own and, in exchange, picks any specific token that is still unminted.
+1. **Free mint.** Anyone can mint for free (gas only), up to 10 per wallet. Each mint gives you random tokens from the pool of unminted tokens.
+2. **Burn & swap.** Don't like one? Burn it and get a random unminted token instead. The token you get from a swap is **final**: it can never be swapped (burned) again.
 
-Burned tokens are gone for good: they never go back into the pool. Every swap shrinks the collection by one, and the pool of unminted tokens is what both the mint and the swaps draw from.
+Burned tokens are gone for good: they never go back into the pool. There is no fixed swap reserve: whatever the mint leaves unminted is the swap pool (e.g. if 250 are minted, the other 305 can be swapped into). Every swap shrinks the collection by one.
 
 ```
-mint:  unminted pool --(random ID)----> you
-swap:  your token    --(burned)-------> gone forever
-       unminted pool --(ID you pick)--> you
+mint:  unminted pool --(random ID)--> you
+swap:  your token    --(burned)-----> gone forever
+       unminted pool --(random ID)--> you   (final, can't be swapped again)
 ```
 
 ## What's in here
@@ -18,22 +18,34 @@ swap:  your token    --(burned)-------> gone forever
 | Path | What it is |
 | --- | --- |
 | `src/BurnSwapPFP.sol` | The ERC-721 contract (OpenZeppelin 5.6) |
-| `test/BurnSwapPFP.t.sol` | Foundry tests, including a full 555 mint-out and a fuzz test of the pool |
+| `test/BurnSwapPFP.t.sol` | Foundry tests, including a full 555 mint-out, fairness checks and a fuzz test |
 | `script/Deploy.s.sol` | Deploy script, configured by env vars |
+| `script/keeper.sh` | Optional bot that reveals everyone's mints and swaps automatically |
 | `web/` | A no-build mint & swap page (plain HTML + [viem](https://viem.sh)) |
 
-## How the contract works
+## How it works
+
+### Mint and swap take two steps: roll, then reveal
+
+If a mint or swap picked its random token in the same transaction, a bot could preview the result and only go through with it when it lands on a rare. To stop that:
+
+1. **Roll.** `mint(quantity)` or `swap(tokenIds)` records a request. For swaps, the old tokens are burned right there, so there is no backing out.
+2. **Reveal.** A few seconds later (once the next Ethereum block is in, usually under 15 seconds), `reveal()` hands out the tokens. The randomness comes from a block hash that didn't exist yet when the request was made.
+
+Requests are revealed strictly in order, so the result is the same no matter who calls `reveal` or when. Anyone can call it: the holder (the web page shows a **Reveal** button), or the keeper bot below so nobody has to click. No outside randomness service or fees are involved.
+
+### Rules
 
 - Token IDs are `1` to `555`. All of them start in the unminted pool.
-- `mint(quantity)`: free, random IDs from the pool. Limited by `maxPerWallet` and by `publicMintCap`.
-- `swap(burnId, newId)`: caller must own `burnId`; `newId` must be unminted. Burns `burnId`, mints `newId` to the caller. If two people go for the same `newId`, the second transaction reverts and nothing is burned.
-- **Swap reserve.** If the free mint hands out all 555, there is nothing left to swap into. `publicMintCap` (default **444**) stops the free mint early so the remaining **111** stay in the pool for swaps. Closing the mint early has the same effect: whatever is still unminted becomes the swap pool.
-- Mint and swap each have their own on/off switch, both off at deploy.
-- Metadata: `tokenURI(id) = baseURI + id + uriSuffix` (suffix defaults to `.json`). Because swappers choose from the unminted tokens, the art for every ID should be public from the start; there is no hidden reveal.
-- Owner functions: `setMintOpen`, `setSwapOpen`, `setPublicMintCap`, `setMaxPerWallet`, `setBaseURI`, `airdrop(to, ids)` (mints specific unminted IDs, e.g. a team allocation). Ownership transfer is two-step (`Ownable2Step`).
-- Views for UIs: `unmintedTokenIds()`, `tokensOfOwner(addr)`, `tokenState(id)` (`0` unminted, `1` owned, `2` burned), `isUnminted(id)`, `previewURI(id)` (works for unminted IDs too), `totalSupply()`, `totalBurned()`.
+- `mint(quantity)`: free, up to `maxPerWallet` (default **10**) per wallet in total, at most 20 per transaction.
+- `swap(tokenIds)`: burn one or more tokens you own (up to 20 at once), get the same number of random unminted tokens. Tokens that came out of a swap can't be swapped again, even after they're sold or transferred (`canSwap(id)` / `swappedIn(id)` tell you). Minted and airdropped tokens can be swapped once.
+- Tokens promised to a pending request are set aside, so a mint or swap can never run out halfway.
+- Mint and swap each have their own on/off switch, both off at deploy. The usual order: open mint, close mint, open swap.
+- Metadata: `tokenURI(id) = baseURI + id + uriSuffix` (suffix defaults to `.json`). The web page shows the unminted art, so all art should be public from the start.
+- Owner functions: `setMintOpen`, `setSwapOpen`, `setMaxPerWallet`, `setBaseURI`, `airdrop(to, ids)` (mints specific unminted IDs, e.g. a team allocation; only while no reveals are pending). Ownership transfer is two-step (`Ownable2Step`).
+- Views for UIs: `available()`, `unmintedTokenIds()`, `tokensOfOwner(addr)`, `tokenState(id)` (`0` unminted, `1` owned, `2` burned), `canSwap(id)`, `pendingOf(addr)`, `isRevealReady(requestId)`, `previewURI(id)`.
 
-Gas: a mint is about 173k gas and a swap about 136k gas, which is a fraction of a cent on Robinhood Chain.
+Gas: a mint or swap request is about 150-170k gas, and a reveal roughly 75-100k gas per token. All of it is a fraction of a cent on Robinhood Chain.
 
 ## Setup
 
@@ -69,7 +81,7 @@ Then use the folder as `BASE_URI`, e.g. `ipfs://<metadata-cid>/`. It can also be
 Gas is paid in ETH. Get testnet ETH from the faucet linked in Robinhood's docs.
 
 ```sh
-cp .env.example .env              # fill in name, symbol, BASE_URI, caps
+cp .env.example .env              # fill in name, symbol, BASE_URI
 cast wallet import deployer --interactive   # stores your key encrypted, once
 
 # Testnet first
@@ -81,7 +93,7 @@ forge script script/Deploy.s.sol \
 #   --verifier-url https://robinhoodchain.blockscout.com/api/
 ```
 
-Set `OWNER` in `.env` to a multisig if you don't want the deployer key to own the collection.
+The deploying wallet becomes the owner (set `OWNER` in `.env` to use a different wallet). Keep that key safe: it controls the switches, the metadata link and airdrops.
 
 ### Running the drop
 
@@ -90,20 +102,29 @@ NFT=0xYourContract
 RPC=robinhood_testnet   # or robinhood
 
 cast send $NFT "setMintOpen(bool)" true  --rpc-url $RPC --account deployer   # start the free mint
-cast send $NFT "setMintOpen(bool)" false --rpc-url $RPC --account deployer   # end it
+cast send $NFT "setMintOpen(bool)" false --rpc-url $RPC --account deployer   # end it; what's left is the swap pool
 cast send $NFT "setSwapOpen(bool)" true  --rpc-url $RPC --account deployer   # start swaps
 
-cast send $NFT "setPublicMintCap(uint256)" 400 --rpc-url $RPC --account deployer
-cast send $NFT "setMaxPerWallet(uint256)" 2   --rpc-url $RPC --account deployer
+cast send $NFT "setMaxPerWallet(uint256)" 5 --rpc-url $RPC --account deployer
 cast send $NFT "setBaseURI(string,string)" "ipfs://<cid>/" ".json" --rpc-url $RPC --account deployer
 cast send $NFT "airdrop(address,uint256[])" 0xTeamWallet "[1,2,3]" --rpc-url $RPC --account deployer
 
-cast call $NFT "unmintedCount()(uint256)" --rpc-url $RPC
+cast call $NFT "available()(uint256)" --rpc-url $RPC   # unminted and not already promised
 ```
+
+### Keeper (optional, recommended)
+
+Run this somewhere that stays on (a small server or your laptop during launch) so every mint and swap reveals within seconds without holders pressing **Reveal**. Use a separate wallet with a little ETH for gas; it doesn't need any special rights.
+
+```sh
+NFT=0xYourContract KEEPER_PRIVATE_KEY=0x... RPC=robinhood ./script/keeper.sh
+```
+
+Without a keeper, holders reveal with the button. A request left unrevealed for about 50 minutes simply gets a fresh random block when someone does reveal it.
 
 ## Web page
 
-`web/` is a static page: connect a wallet, mint, then pick one of your PFPs to burn and an unminted one to claim. It adds/switches the wallet to Robinhood Chain automatically.
+`web/` is a static page: connect a wallet, mint, reveal, select PFPs to swap. Swapped PFPs are tagged *final*. It adds/switches the wallet to Robinhood Chain automatically.
 
 1. Edit `web/config.js`: set `network` (`robinhood` or `robinhoodTestnet`) and `contractAddress`. Set `rpcUrl` to a dedicated RPC (Alchemy, QuickNode, etc.) before a public launch; the public one is rate limited.
 2. Host the `web/` folder anywhere static (Vercel, Netlify, IPFS, S3). Locally: `cd web && python3 -m http.server 8080`.
@@ -113,7 +134,7 @@ It loads viem from esm.sh, so there is no build step.
 ## Local end-to-end run
 
 ```sh
-anvil                                   # terminal 1
+anvil --block-time 1                    # terminal 1
 # terminal 2, using anvil's first dev key
 NFT_NAME="Local" NFT_SYMBOL="LOC" BASE_URI="ipfs://<cid>/" forge script script/Deploy.s.sol \
   --rpc-url http://127.0.0.1:8545 --broadcast \
@@ -122,10 +143,9 @@ cd web && python3 -m http.server 8080
 # open http://127.0.0.1:8080/?network=local&contract=<address>&rpc=http://127.0.0.1:8545
 ```
 
-## Things to decide before launch
+## Things to know before launch
 
-- **Bots.** A free mint with only a per-wallet limit can be farmed by anyone with many wallets. If that matters, add an allowlist (Merkle root), a signature from your backend, or a small price.
-- **Mint randomness** uses block data. It is not tamper proof: a contract can retry until it gets an ID it likes. Since anyone can pick a specific unminted ID through `swap` anyway, there is little to gain, but if you want provably fair random mints you would need a VRF on Robinhood Chain.
-- **Owner trust.** The owner can change caps, metadata and airdrop unminted IDs (which shrinks the swap pool). Use a multisig as owner.
+- **Bots.** A free mint with only a per-wallet limit can be farmed by anyone with many wallets. If that matters, add an allowlist, a signature from your backend, or a small price.
+- **Randomness** depends on block hashes produced by Robinhood Chain's sequencer, which Robinhood runs. That's fine for a PFP drop; it just means the chain operator is trusted not to rig it.
 - **Royalties** (ERC-2981) are not included.
 - This code has tests but has not been audited.

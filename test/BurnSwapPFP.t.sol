@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.24;
 
-import {Test} from "forge-std/Test.sol";
+import {Test, Vm} from "forge-std/Test.sol";
 import {BurnSwapPFP} from "../src/BurnSwapPFP.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IERC721Errors} from "@openzeppelin/contracts/interfaces/draft-IERC6093.sol";
@@ -12,50 +12,68 @@ contract BurnSwapPFPTest is Test {
     address owner = makeAddr("owner");
     address alice = makeAddr("alice");
     address bob = makeAddr("bob");
+    address keeper = makeAddr("keeper");
 
     uint256 constant MAX = 555;
 
-    event Swapped(address indexed holder, uint256 indexed burnedId, uint256 indexed newId);
+    event RevealRequested(uint256 indexed requestId, address indexed to, uint256 count, bool isSwap);
+    event RevealDelayed(uint256 indexed requestId);
     event BatchMetadataUpdate(uint256 _fromTokenId, uint256 _toTokenId);
 
     function setUp() public {
-        nft = new BurnSwapPFP("Burn Swap PFP", "BSP", owner, "ipfs://cid/", 444, 1);
+        nft = new BurnSwapPFP("Burn Swap PFP", "BSP", owner, "ipfs://cid/", 10);
     }
 
     // ---- helpers ----------------------------------------------------------
 
-    function _openMint() internal {
-        vm.prank(owner);
+    function _open() internal {
+        vm.startPrank(owner);
         nft.setMintOpen(true);
-    }
-
-    function _openSwap() internal {
-        vm.prank(owner);
         nft.setSwapOpen(true);
+        vm.stopPrank();
     }
 
-    function _mintOne(address who) internal returns (uint256 id) {
+    function _nextBlock() internal {
+        vm.roll(block.number + 1);
+    }
+
+    /// Reveals everything that is pending (after letting the request block finish).
+    function _revealAll() internal {
+        _nextBlock();
+        vm.prank(keeper);
+        nft.reveal(type(uint256).max);
+        assertEq(nft.nextToReveal(), nft.nextRequestId(), "queue not empty");
+    }
+
+    function _mintRevealed(address who, uint256 quantity) internal returns (uint256[] memory) {
         vm.prank(who);
-        nft.mint(1);
-        id = nft.tokensOfOwner(who)[0];
+        nft.mint(quantity);
+        _revealAll();
+        return nft.tokensOfOwner(who);
     }
 
-    function _firstUnmintedExcept(uint256 skip) internal view returns (uint256) {
-        uint256[] memory ids = nft.unmintedTokenIds();
-        return ids[0] == skip ? ids[1] : ids[0];
+    function _swap(address who, uint256 id) internal {
+        uint256[] memory ids = new uint256[](1);
+        ids[0] = id;
+        vm.prank(who);
+        nft.swap(ids);
+    }
+
+    function _one(uint256 id) internal pure returns (uint256[] memory ids) {
+        ids = new uint256[](1);
+        ids[0] = id;
     }
 
     // ---- deployment -------------------------------------------------------
 
     function test_InitialState() public view {
         assertEq(nft.name(), "Burn Swap PFP");
-        assertEq(nft.symbol(), "BSP");
         assertEq(nft.owner(), owner);
         assertEq(nft.MAX_SUPPLY(), MAX);
         assertEq(nft.unmintedCount(), MAX);
+        assertEq(nft.available(), MAX);
         assertEq(nft.totalSupply(), 0);
-        assertEq(nft.publicMintCap(), 444);
-        assertEq(nft.maxPerWallet(), 1);
+        assertEq(nft.maxPerWallet(), 10);
         assertFalse(nft.mintOpen());
         assertFalse(nft.swapOpen());
 
@@ -66,43 +84,69 @@ contract BurnSwapPFPTest is Test {
         }
     }
 
-    function test_RevertWhen_CapAboveSupply() public {
-        vm.expectRevert(BurnSwapPFP.InvalidPublicMintCap.selector);
-        new BurnSwapPFP("x", "x", owner, "", MAX + 1, 1);
-    }
-
     // ---- mint -------------------------------------------------------------
 
-    function test_Mint() public {
-        _openMint();
-        uint256 id = _mintOne(alice);
-
-        assertGe(id, 1);
-        assertLe(id, MAX);
-        assertEq(nft.ownerOf(id), alice);
-        assertEq(nft.mintedBy(alice), 1);
-        assertEq(nft.publicMinted(), 1);
-        assertEq(nft.unmintedCount(), MAX - 1);
-        assertEq(nft.totalSupply(), 1);
-        assertFalse(nft.isUnminted(id));
-        assertEq(uint8(nft.tokenState(id)), uint8(BurnSwapPFP.TokenState.Owned));
-    }
-
-    function test_MintMultipleGivesDistinctIds() public {
-        vm.startPrank(owner);
-        nft.setMaxPerWallet(20);
-        nft.setMintOpen(true);
-        vm.stopPrank();
-
+    function test_MintIsRevealedInALaterBlock() public {
+        _open();
+        vm.expectEmit(address(nft));
+        emit RevealRequested(0, alice, 3, false);
         vm.prank(alice);
-        nft.mint(20);
+        nft.mint(3);
+
+        // Nothing is minted yet, but the tokens are set aside.
+        assertEq(nft.balanceOf(alice), 0);
+        assertEq(nft.pendingOf(alice), 3);
+        assertEq(nft.pendingDraws(), 3);
+        assertEq(nft.available(), MAX - 3);
+        assertEq(nft.unmintedCount(), MAX);
+        assertEq(nft.mintedBy(alice), 3);
+        assertEq(nft.lastRequestOf(alice), 0);
+
+        // Same block: can't reveal yet.
+        assertFalse(nft.isRevealReady(0));
+        assertEq(nft.reveal(10), 0);
+        assertEq(nft.balanceOf(alice), 0);
+
+        _nextBlock();
+        assertTrue(nft.isRevealReady(0));
+        vm.prank(keeper); // anyone can reveal, tokens still go to alice
+        assertEq(nft.reveal(10), 1);
 
         uint256[] memory ids = nft.tokensOfOwner(alice);
-        assertEq(ids.length, 20);
-        for (uint256 i = 1; i < ids.length; ++i) {
-            assertGt(ids[i], ids[i - 1]); // ascending and therefore distinct
+        assertEq(ids.length, 3);
+        assertEq(nft.balanceOf(keeper), 0);
+        assertEq(nft.pendingOf(alice), 0);
+        assertEq(nft.pendingDraws(), 0);
+        assertEq(nft.unmintedCount(), MAX - 3);
+        assertEq(nft.totalSupply(), 3);
+        for (uint256 i; i < ids.length; ++i) {
+            assertFalse(nft.swappedIn(ids[i]));
+            assertTrue(nft.canSwap(ids[i]));
+            assertFalse(nft.isUnminted(ids[i]));
         }
-        assertEq(nft.unmintedCount(), MAX - 20);
+    }
+
+    function test_TenPerWallet() public {
+        _open();
+        vm.startPrank(alice);
+        nft.mint(4);
+        nft.mint(6);
+        vm.expectRevert(BurnSwapPFP.ExceedsWalletLimit.selector);
+        nft.mint(1);
+        vm.stopPrank();
+        _revealAll();
+        assertEq(nft.balanceOf(alice), 10);
+    }
+
+    function test_WalletLimitCountsMintsNotBalance() public {
+        _open();
+        uint256[] memory ids = _mintRevealed(alice, 10);
+        vm.prank(alice);
+        nft.transferFrom(alice, bob, ids[0]);
+
+        vm.prank(alice);
+        vm.expectRevert(BurnSwapPFP.ExceedsWalletLimit.selector);
+        nft.mint(1);
     }
 
     function test_RevertWhen_MintClosed() public {
@@ -112,250 +156,335 @@ contract BurnSwapPFPTest is Test {
     }
 
     function test_RevertWhen_MintZero() public {
-        _openMint();
+        _open();
         vm.prank(alice);
         vm.expectRevert(BurnSwapPFP.ZeroQuantity.selector);
         nft.mint(0);
     }
 
-    function test_RevertWhen_MintOverWalletLimit() public {
-        _openMint();
-        _mintOne(alice);
-        vm.prank(alice);
-        vm.expectRevert(BurnSwapPFP.ExceedsWalletLimit.selector);
-        nft.mint(1);
-    }
-
-    function test_WalletLimitCountsMintsNotBalance() public {
-        _openMint();
-        uint256 id = _mintOne(alice);
-        vm.prank(alice);
-        nft.transferFrom(alice, bob, id);
-
-        vm.prank(alice);
-        vm.expectRevert(BurnSwapPFP.ExceedsWalletLimit.selector);
-        nft.mint(1);
-    }
-
-    function test_RevertWhen_MintOverPublicCap() public {
+    function test_RevertWhen_MintMoreThanPerTx() public {
         vm.startPrank(owner);
-        nft.setPublicMintCap(2);
+        nft.setMaxPerWallet(100);
         nft.setMintOpen(true);
         vm.stopPrank();
-
-        _mintOne(alice);
-        _mintOne(bob);
-
-        vm.prank(makeAddr("carol"));
-        vm.expectRevert(BurnSwapPFP.ExceedsPublicMintCap.selector);
-        nft.mint(1);
+        vm.prank(alice);
+        vm.expectRevert(BurnSwapPFP.TooManyPerTx.selector);
+        nft.mint(21);
     }
 
-    function test_PublicCapKeepsReserveForSwaps() public {
+    function test_MintCanTakeEverything() public {
         vm.startPrank(owner);
-        nft.setPublicMintCap(MAX - 5);
         nft.setMaxPerWallet(MAX);
         nft.setMintOpen(true);
         vm.stopPrank();
 
-        vm.prank(alice);
-        nft.mint(MAX - 5);
-
-        assertEq(nft.unmintedCount(), 5);
-        assertEq(nft.unmintedTokenIds().length, 5);
-    }
-
-    function test_RevertWhen_PoolExhaustedByAirdrops() public {
-        uint256[] memory ids = new uint256[](MAX - 1);
-        for (uint256 i; i < ids.length; ++i) {
-            ids[i] = i + 1;
+        vm.startPrank(alice);
+        for (uint256 i; i < 27; ++i) {
+            nft.mint(20);
         }
-        vm.startPrank(owner);
-        nft.airdrop(owner, ids);
-        nft.setMaxPerWallet(5);
-        nft.setMintOpen(true);
-        vm.stopPrank();
-
-        vm.prank(alice);
-        vm.expectRevert(BurnSwapPFP.PoolExhausted.selector);
-        nft.mint(2);
-
-        vm.prank(alice);
+        nft.mint(15);
+        assertEq(nft.available(), 0);
+        vm.expectRevert(BurnSwapPFP.NotEnoughUnminted.selector);
         nft.mint(1);
-        assertEq(nft.ownerOf(MAX), alice);
-        assertEq(nft.unmintedCount(), 0);
-    }
-
-    function test_FullMintOut() public {
-        vm.startPrank(owner);
-        nft.setPublicMintCap(MAX);
-        nft.setMintOpen(true);
         vm.stopPrank();
 
-        for (uint256 i; i < MAX; ++i) {
-            address minter = vm.addr(i + 1);
-            vm.prank(minter);
-            nft.mint(1);
-            vm.roll(block.number + 1);
-        }
-
+        _revealAll();
+        assertEq(nft.balanceOf(alice), MAX);
         assertEq(nft.unmintedCount(), 0);
         assertEq(nft.totalSupply(), MAX);
-        assertEq(nft.unmintedTokenIds().length, 0);
         for (uint256 id = 1; id <= MAX; ++id) {
-            assertEq(uint8(nft.tokenState(id)), uint8(BurnSwapPFP.TokenState.Owned));
+            assertEq(nft.ownerOf(id), alice);
         }
+    }
+
+    function test_WhateverIsLeftIsTheSwapPool() public {
+        _open();
+        for (uint256 i; i < 25; ++i) {
+            vm.prank(vm.addr(i + 1));
+            nft.mint(10);
+        }
+        _revealAll();
+        vm.prank(owner);
+        nft.setMintOpen(false);
+
+        assertEq(nft.totalSupply(), 250);
+        assertEq(nft.unmintedCount(), MAX - 250);
+        assertEq(nft.available(), MAX - 250);
     }
 
     // ---- swap -------------------------------------------------------------
 
     function test_Swap() public {
-        _openMint();
-        _openSwap();
-        uint256 oldId = _mintOne(alice);
-        uint256 newId = _firstUnmintedExcept(oldId);
+        _open();
+        uint256 oldId = _mintRevealed(alice, 1)[0];
 
         vm.expectEmit(address(nft));
-        emit Swapped(alice, oldId, newId);
-        vm.prank(alice);
-        nft.swap(oldId, newId);
+        emit RevealRequested(1, alice, 1, true);
+        _swap(alice, oldId);
 
-        assertEq(nft.ownerOf(newId), alice);
-        assertEq(nft.balanceOf(alice), 1);
+        // Burned straight away, replacement arrives on reveal.
+        assertEq(nft.balanceOf(alice), 0);
         assertEq(nft.totalBurned(), 1);
-        assertEq(nft.unmintedCount(), MAX - 2);
-        assertEq(nft.totalSupply(), 1);
         assertEq(uint8(nft.tokenState(oldId)), uint8(BurnSwapPFP.TokenState.Burned));
-        assertEq(uint8(nft.tokenState(newId)), uint8(BurnSwapPFP.TokenState.Owned));
-        assertFalse(nft.isUnminted(oldId));
-
         vm.expectRevert(abi.encodeWithSelector(IERC721Errors.ERC721NonexistentToken.selector, oldId));
         nft.ownerOf(oldId);
+
+        _revealAll();
+        uint256 newId = nft.tokensOfOwner(alice)[0];
+        assertTrue(newId != oldId);
+        assertTrue(nft.swappedIn(newId));
+        assertFalse(nft.canSwap(newId));
+        assertEq(nft.totalSupply(), 1);
+        assertEq(nft.unmintedCount(), MAX - 2);
+        assertFalse(nft.isUnminted(oldId));
+    }
+
+    function test_RevertWhen_SwappingASwappedToken() public {
+        _open();
+        uint256 oldId = _mintRevealed(alice, 1)[0];
+        _swap(alice, oldId);
+        _revealAll();
+        uint256 newId = nft.tokensOfOwner(alice)[0];
+
+        vm.prank(alice);
+        vm.expectRevert(abi.encodeWithSelector(BurnSwapPFP.AlreadySwapped.selector, newId));
+        nft.swap(_one(newId));
+
+        // Still final after changing hands.
+        vm.prank(alice);
+        nft.transferFrom(alice, bob, newId);
+        vm.prank(bob);
+        vm.expectRevert(abi.encodeWithSelector(BurnSwapPFP.AlreadySwapped.selector, newId));
+        nft.swap(_one(newId));
+    }
+
+    function test_SwapSeveralAtOnce() public {
+        _open();
+        uint256[] memory ids = _mintRevealed(alice, 5);
+
+        vm.prank(alice);
+        nft.swap(ids);
+        assertEq(nft.balanceOf(alice), 0);
+        assertEq(nft.totalBurned(), 5);
+        assertEq(nft.pendingOf(alice), 5);
+
+        _revealAll();
+        uint256[] memory fresh = nft.tokensOfOwner(alice);
+        assertEq(fresh.length, 5);
+        for (uint256 i; i < fresh.length; ++i) {
+            assertTrue(nft.swappedIn(fresh[i]));
+            for (uint256 j; j < ids.length; ++j) {
+                assertTrue(fresh[i] != ids[j]);
+            }
+        }
     }
 
     function test_SwapDoesNotUseMintAllowance() public {
-        _openMint();
-        _openSwap();
-        uint256 id = _mintOne(alice);
-        for (uint256 i; i < 10; ++i) {
-            uint256 next = _firstUnmintedExcept(id);
-            vm.prank(alice);
-            nft.swap(id, next);
-            id = next;
-        }
-        assertEq(nft.mintedBy(alice), 1);
-        assertEq(nft.publicMinted(), 1);
-        assertEq(nft.totalBurned(), 10);
+        _open();
+        uint256[] memory ids = _mintRevealed(alice, 10);
+        vm.prank(alice);
+        nft.swap(ids);
+        _revealAll();
+        assertEq(nft.mintedBy(alice), 10);
+        assertEq(nft.publicMinted(), 10);
+        assertEq(nft.balanceOf(alice), 10);
     }
 
-    function test_SwapReserveStillAvailableAfterPublicCap() public {
-        vm.startPrank(owner);
-        nft.setPublicMintCap(1);
-        nft.setMintOpen(true);
-        nft.setSwapOpen(true);
-        vm.stopPrank();
-
-        uint256 id = _mintOne(alice);
-        uint256 target = id == MAX ? 1 : MAX;
-        vm.prank(alice);
-        nft.swap(id, target);
-        assertEq(nft.ownerOf(target), alice);
+    function test_AirdroppedTokensCanBeSwapped() public {
+        _open();
+        vm.prank(owner);
+        nft.airdrop(bob, _one(42));
+        assertTrue(nft.canSwap(42));
+        _swap(bob, 42);
+        _revealAll();
+        assertEq(nft.balanceOf(bob), 1);
     }
 
     function test_RevertWhen_SwapClosed() public {
-        _openMint();
-        uint256 id = _mintOne(alice);
-        uint256 target = _firstUnmintedExcept(id);
+        vm.prank(owner);
+        nft.setMintOpen(true);
+        uint256 id = _mintRevealed(alice, 1)[0];
         vm.prank(alice);
         vm.expectRevert(BurnSwapPFP.SwapClosed.selector);
-        nft.swap(id, target);
+        nft.swap(_one(id));
+    }
+
+    function test_RevertWhen_SwapNothing() public {
+        _open();
+        vm.prank(alice);
+        vm.expectRevert(BurnSwapPFP.ZeroQuantity.selector);
+        nft.swap(new uint256[](0));
     }
 
     function test_RevertWhen_SwapNotOwner() public {
-        _openMint();
-        _openSwap();
-        uint256 id = _mintOne(alice);
-        uint256 target = _firstUnmintedExcept(id);
-
+        _open();
+        uint256 id = _mintRevealed(alice, 1)[0];
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(BurnSwapPFP.NotTokenOwner.selector, id));
-        nft.swap(id, target);
+        nft.swap(_one(id));
     }
 
     function test_RevertWhen_SwapByApprovedOperator() public {
-        _openMint();
-        _openSwap();
-        uint256 id = _mintOne(alice);
+        _open();
+        uint256 id = _mintRevealed(alice, 1)[0];
         vm.prank(alice);
         nft.setApprovalForAll(bob, true);
-        uint256 target = _firstUnmintedExcept(id);
-
         vm.prank(bob);
         vm.expectRevert(abi.encodeWithSelector(BurnSwapPFP.NotTokenOwner.selector, id));
-        nft.swap(id, target);
+        nft.swap(_one(id));
     }
 
-    function test_RevertWhen_SwapForOwnedToken() public {
-        _openMint();
-        _openSwap();
-        uint256 a = _mintOne(alice);
-        uint256 b = _mintOne(bob);
-
+    function test_RevertWhen_SwapSameTokenTwiceInOneCall() public {
+        _open();
+        uint256 id = _mintRevealed(alice, 1)[0];
+        uint256[] memory ids = new uint256[](2);
+        ids[0] = id;
+        ids[1] = id;
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(BurnSwapPFP.NotUnminted.selector, b));
-        nft.swap(a, b);
-    }
-
-    function test_RevertWhen_SwapForSelf() public {
-        _openMint();
-        _openSwap();
-        uint256 id = _mintOne(alice);
-        vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(BurnSwapPFP.NotUnminted.selector, id));
-        nft.swap(id, id);
-    }
-
-    function test_RevertWhen_SwapForBurnedToken() public {
-        _openMint();
-        _openSwap();
-        uint256 a = _mintOne(alice);
-        uint256 a2 = _firstUnmintedExcept(a);
-        vm.prank(alice);
-        nft.swap(a, a2);
-
-        uint256 b = _mintOne(bob);
-        vm.prank(bob);
-        vm.expectRevert(abi.encodeWithSelector(BurnSwapPFP.NotUnminted.selector, a));
-        nft.swap(b, a);
-    }
-
-    function test_RevertWhen_SwapForOutOfRangeId() public {
-        _openMint();
-        _openSwap();
-        uint256 id = _mintOne(alice);
-
-        vm.startPrank(alice);
-        vm.expectRevert(abi.encodeWithSelector(BurnSwapPFP.NotUnminted.selector, 0));
-        nft.swap(id, 0);
-        vm.expectRevert(abi.encodeWithSelector(BurnSwapPFP.NotUnminted.selector, MAX + 1));
-        nft.swap(id, MAX + 1);
-        vm.stopPrank();
+        vm.expectRevert(abi.encodeWithSelector(BurnSwapPFP.NotTokenOwner.selector, id));
+        nft.swap(ids);
     }
 
     function test_RevertWhen_SwapWithPoolEmpty() public {
         vm.startPrank(owner);
-        nft.setPublicMintCap(MAX);
         nft.setMaxPerWallet(MAX);
         nft.setMintOpen(true);
         nft.setSwapOpen(true);
         vm.stopPrank();
+        vm.startPrank(alice);
+        for (uint256 i; i < 27; ++i) {
+            nft.mint(20);
+        }
+        nft.mint(15);
+        vm.stopPrank();
+        _revealAll();
 
         vm.prank(alice);
-        nft.mint(MAX);
+        vm.expectRevert(BurnSwapPFP.NotEnoughUnminted.selector);
+        nft.swap(_one(1));
+    }
 
+    function test_PendingRequestsReserveTokens() public {
+        // Leave exactly 3 unminted, all promised to a pending mint: a swap must not be able to take them.
+        vm.startPrank(owner);
+        nft.setMaxPerWallet(MAX);
+        nft.setMintOpen(true);
+        nft.setSwapOpen(true);
+        vm.stopPrank();
+        vm.startPrank(alice);
+        for (uint256 i; i < 27; ++i) {
+            nft.mint(20);
+        }
+        nft.mint(12);
+        vm.stopPrank();
+        _revealAll();
+
+        vm.prank(bob);
+        nft.mint(3);
+        assertEq(nft.available(), 0);
+
+        uint256[] memory mine = _one(nft.tokensOfOwner(alice)[0]);
         vm.prank(alice);
-        vm.expectRevert(abi.encodeWithSelector(BurnSwapPFP.NotUnminted.selector, 2));
-        nft.swap(1, 2);
+        vm.expectRevert(BurnSwapPFP.NotEnoughUnminted.selector);
+        nft.swap(mine);
+
+        _revealAll();
+        assertEq(nft.balanceOf(bob), 3);
+    }
+
+    // ---- reveal: fairness -------------------------------------------------
+
+    /// The result of a request must not depend on who reveals it or how long they wait.
+    function test_RevealResultDoesNotDependOnTiming() public {
+        _open();
+        vm.prank(alice);
+        nft.mint(5);
+        vm.prank(bob);
+        nft.mint(5);
+
+        uint256 snap = vm.snapshotState();
+        vm.roll(block.number + 1);
+        nft.reveal(10);
+        uint256[] memory early = nft.tokensOfOwner(alice);
+
+        vm.revertToState(snap);
+        vm.roll(block.number + 200);
+        vm.prank(bob);
+        nft.reveal(10);
+        assertEq(nft.tokensOfOwner(alice), early);
+    }
+
+    /// Requests made after yours can't change your result.
+    function test_LaterRequestsDoNotAffectEarlierOnes() public {
+        _open();
+        vm.prank(alice);
+        nft.mint(5);
+
+        uint256 snap = vm.snapshotState();
+        _revealAll();
+        uint256[] memory alone = nft.tokensOfOwner(alice);
+
+        vm.revertToState(snap);
+        vm.prank(bob);
+        nft.mint(10);
+        _nextBlock();
+        vm.prank(makeAddr("carol"));
+        nft.mint(10);
+        _revealAll();
+        assertEq(nft.tokensOfOwner(alice), alone);
+    }
+
+    function test_RevealIsInOrder() public {
+        _open();
+        vm.prank(alice);
+        nft.mint(2);
+        vm.prank(bob);
+        nft.mint(2);
+        _nextBlock();
+
+        assertEq(nft.reveal(1), 1);
+        assertEq(nft.balanceOf(alice), 2);
+        assertEq(nft.balanceOf(bob), 0);
+        assertEq(nft.nextToReveal(), 1);
+
+        assertEq(nft.reveal(1), 1);
+        assertEq(nft.balanceOf(bob), 2);
+    }
+
+    function test_RevealStopsAtUnfinishedBlock() public {
+        _open();
+        vm.prank(alice);
+        nft.mint(1);
+        _nextBlock();
+        vm.prank(bob);
+        nft.mint(1);
+
+        assertEq(nft.reveal(10), 1); // bob's request was made in this block
+        assertEq(nft.balanceOf(alice), 1);
+        assertEq(nft.balanceOf(bob), 0);
+        assertFalse(nft.isRevealReady(1));
+    }
+
+    function test_ExpiredRequestGetsFreshEntropy() public {
+        _open();
+        vm.prank(alice);
+        nft.mint(3);
+        vm.roll(block.number + 300); // blockhash of the request block is gone
+
+        vm.expectEmit(address(nft));
+        emit RevealDelayed(0);
+        assertEq(nft.reveal(10), 0);
+        assertEq(nft.balanceOf(alice), 0);
+        assertEq(nft.getRequest(0).entropyBlock, block.number);
+
+        _nextBlock();
+        assertEq(nft.reveal(10), 1);
+        assertEq(nft.balanceOf(alice), 3);
+    }
+
+    function test_RevealWithNothingPending() public {
+        assertEq(nft.reveal(10), 0);
+        assertFalse(nft.isRevealReady(0));
     }
 
     // ---- airdrop ----------------------------------------------------------
@@ -374,8 +503,21 @@ contract BurnSwapPFPTest is Test {
         assertEq(nft.unmintedCount(), MAX - 3);
         assertEq(nft.publicMinted(), 0);
         assertFalse(nft.isUnminted(1));
-        assertFalse(nft.isUnminted(555));
-        assertFalse(nft.isUnminted(100));
+    }
+
+    function test_RevertWhen_AirdropWhileRevealsPending() public {
+        _open();
+        vm.prank(alice);
+        nft.mint(1);
+        vm.prank(owner);
+        vm.expectRevert(BurnSwapPFP.RevealsPending.selector);
+        nft.airdrop(bob, _one(7));
+
+        _revealAll();
+        uint256 free = nft.unmintedTokenIds()[0];
+        vm.prank(owner);
+        nft.airdrop(bob, _one(free));
+        assertEq(nft.ownerOf(free), bob);
     }
 
     function test_RevertWhen_AirdropTakenId() public {
@@ -388,18 +530,16 @@ contract BurnSwapPFPTest is Test {
     }
 
     function test_RevertWhen_AirdropNotOwner() public {
-        uint256[] memory ids = new uint256[](1);
-        ids[0] = 7;
         vm.prank(alice);
         vm.expectRevert(abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, alice));
-        nft.airdrop(alice, ids);
+        nft.airdrop(alice, _one(7));
     }
 
     // ---- metadata ---------------------------------------------------------
 
     function test_TokenURI() public {
-        _openMint();
-        uint256 id = _mintOne(alice);
+        _open();
+        uint256 id = _mintRevealed(alice, 1)[0];
         assertEq(nft.tokenURI(id), string.concat("ipfs://cid/", vm.toString(id), ".json"));
     }
 
@@ -451,30 +591,10 @@ contract BurnSwapPFPTest is Test {
         vm.expectRevert(err);
         nft.setSwapOpen(true);
         vm.expectRevert(err);
-        nft.setPublicMintCap(1);
-        vm.expectRevert(err);
         nft.setMaxPerWallet(5);
         vm.expectRevert(err);
         nft.setBaseURI("x", "");
         vm.stopPrank();
-    }
-
-    function test_RevertWhen_CapBelowMinted() public {
-        vm.startPrank(owner);
-        nft.setMaxPerWallet(3);
-        nft.setMintOpen(true);
-        vm.stopPrank();
-        vm.prank(alice);
-        nft.mint(3);
-
-        vm.startPrank(owner);
-        vm.expectRevert(BurnSwapPFP.InvalidPublicMintCap.selector);
-        nft.setPublicMintCap(2);
-        vm.expectRevert(BurnSwapPFP.InvalidPublicMintCap.selector);
-        nft.setPublicMintCap(MAX + 1);
-        nft.setPublicMintCap(3);
-        vm.stopPrank();
-        assertEq(nft.publicMintCap(), 3);
     }
 
     function test_OwnershipTransferIsTwoStep() public {
@@ -486,53 +606,73 @@ contract BurnSwapPFPTest is Test {
         assertEq(nft.owner(), bob);
     }
 
+    // ---- gas --------------------------------------------------------------
+
+    function test_GasOfLargestReveal() public {
+        vm.startPrank(owner);
+        nft.setMaxPerWallet(20);
+        nft.setMintOpen(true);
+        vm.stopPrank();
+        vm.prank(alice);
+        nft.mint(20);
+        _nextBlock();
+        uint256 before = gasleft();
+        nft.reveal(1);
+        uint256 used = before - gasleft();
+        assertLt(used, 2_000_000);
+    }
+
     // ---- fuzz -------------------------------------------------------------
 
-    /// Random sequences of airdrops (picked IDs), mints (random IDs) and swaps keep the pool consistent.
-    function testFuzz_PoolStaysConsistent(uint256 seed) public {
+    /// Random sequences of mints, swaps, reveals and block changes keep the books consistent.
+    function testFuzz_StaysConsistent(uint256 seed) public {
         vm.startPrank(owner);
-        nft.setPublicMintCap(MAX);
         nft.setMaxPerWallet(MAX);
         nft.setMintOpen(true);
         nft.setSwapOpen(true);
         vm.stopPrank();
 
+        address[3] memory users = [alice, bob, makeAddr("carol")];
         for (uint256 step; step < 60; ++step) {
             seed = uint256(keccak256(abi.encode(seed, step)));
-            uint256 unminted = nft.unmintedCount();
-            if (unminted == 0) break;
+            address user = users[seed % 3];
+            uint256 action = (seed >> 8) % 4;
+            uint256 avail = nft.available();
 
-            uint256 action = seed % 3;
-            if (action == 0) {
-                vm.prank(alice);
-                nft.mint(1 + (seed >> 8) % (unminted < 4 ? unminted : 4));
-            } else if (action == 1) {
-                uint256[] memory ids = new uint256[](1);
-                ids[0] = nft.unmintedTokenIds()[(seed >> 8) % unminted];
-                vm.prank(owner);
-                nft.airdrop(bob, ids);
+            if (action == 0 && avail > 0) {
+                vm.prank(user);
+                nft.mint(1 + (seed >> 16) % (avail < 5 ? avail : 5));
+            } else if (action == 1 && avail > 0) {
+                uint256[] memory held = nft.tokensOfOwner(user);
+                uint256 n;
+                uint256[] memory pick = new uint256[](held.length);
+                for (uint256 i; i < held.length && n < avail && n < 3; ++i) {
+                    if (nft.canSwap(held[i])) pick[n++] = held[i];
+                }
+                if (n == 0) continue;
+                assembly {
+                    mstore(pick, n)
+                }
+                vm.prank(user);
+                nft.swap(pick);
+            } else if (action == 2) {
+                vm.prank(user);
+                nft.reveal(1 + (seed >> 24) % 3);
             } else {
-                uint256[] memory held = nft.tokensOfOwner(alice);
-                if (held.length == 0) continue;
-                uint256 burnId = held[(seed >> 8) % held.length];
-                uint256 newId = nft.unmintedTokenIds()[(seed >> 16) % unminted];
-                vm.prank(alice);
-                nft.swap(burnId, newId);
+                vm.roll(block.number + 1 + (seed >> 32) % 3);
             }
-            vm.roll(block.number + 1);
         }
-
-        _assertConsistent();
+        _revealAll();
+        _assertConsistent(users);
     }
 
-    function _assertConsistent() internal view {
+    function _assertConsistent(address[3] memory users) internal view {
         uint256[] memory pool = nft.unmintedTokenIds();
         assertEq(pool.length, nft.unmintedCount());
+        assertEq(nft.pendingDraws(), 0);
 
         bool[] memory inPool = new bool[](MAX + 1);
         for (uint256 i; i < pool.length; ++i) {
-            assertGe(pool[i], 1);
-            assertLe(pool[i], MAX);
             assertFalse(inPool[pool[i]], "duplicate in pool");
             inPool[pool[i]] = true;
         }
@@ -544,15 +684,21 @@ contract BurnSwapPFPTest is Test {
             assertEq(nft.isUnminted(id), inPool[id]);
             if (inPool[id]) {
                 assertEq(uint8(s), uint8(BurnSwapPFP.TokenState.Unminted));
+                assertFalse(nft.swappedIn(id));
             } else if (s == BurnSwapPFP.TokenState.Owned) {
                 ++owned;
             } else {
                 ++burned;
+                assertFalse(nft.swappedIn(id), "a swapped-in token was burned");
             }
         }
         assertEq(owned, nft.totalSupply());
         assertEq(burned, nft.totalBurned());
         assertEq(owned + burned + pool.length, MAX);
-        assertEq(nft.balanceOf(alice) + nft.balanceOf(bob), owned);
+        uint256 balances;
+        for (uint256 i; i < users.length; ++i) {
+            balances += nft.balanceOf(users[i]);
+        }
+        assertEq(balances, owned);
     }
 }

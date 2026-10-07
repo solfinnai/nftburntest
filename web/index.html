@@ -42,14 +42,18 @@
       .stat b { display: block; font-size: 22px; }
       .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
       .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; margin-top: 12px; }
+      .grid > p { grid-column: 1 / -1; margin: 0; }
       .card {
         padding: 0; overflow: hidden; text-align: left; border-radius: 12px; background: #0f1216;
         display: flex; flex-direction: column;
       }
       .card .art { aspect-ratio: 1; width: 100%; background: #1c2128 center/cover no-repeat; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
       .card .label { padding: 6px 8px; font-size: 13px; }
-      .card[aria-pressed="true"] { outline: 3px solid var(--accent); outline-offset: -3px; }
-      .card.burn[aria-pressed="true"] { outline-color: var(--danger); }
+      .card[aria-pressed="true"] { outline: 3px solid var(--danger); outline-offset: -3px; }
+      .card .label { display: flex; justify-content: space-between; gap: 6px; }
+      .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; }
+      .tag.new { color: var(--accent); border-color: var(--accent); }
+      #pending { display: none; border-color: var(--accent); }
       input[type="search"], input[type="number"] {
         font: inherit; color: var(--text); background: #0f1216; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
       }
@@ -82,16 +86,22 @@
 
       <section>
         <div class="stats">
-          <div class="stat"><span class="muted">Free minted</span><b id="statMinted">-</b></div>
-          <div class="stat"><span class="muted">Unminted pool</span><b id="statPool">-</b></div>
+          <div class="stat"><span class="muted">Minted</span><b id="statMinted">-</b></div>
+          <div class="stat"><span class="muted">Left to mint or swap into</span><b id="statPool">-</b></div>
           <div class="stat"><span class="muted">Burned in swaps</span><b id="statBurned">-</b></div>
           <div class="stat"><span class="muted">Live supply</span><b id="statSupply">-</b></div>
         </div>
       </section>
 
+      <section id="pending">
+        <h2>Rolling the dice…</h2>
+        <p class="muted" id="pendingText"></p>
+        <button id="revealBtn" class="primary" disabled>Reveal</button>
+      </section>
+
       <section>
         <h2>Free mint</h2>
-        <p class="muted" id="mintHelp">You get random PFPs from the unminted pool. Only gas, no price.</p>
+        <p class="muted" id="mintHelp">Random PFPs from the unminted pool, free apart from gas.</p>
         <div class="row">
           <input type="number" id="qty" min="1" value="1" aria-label="Quantity" />
           <button id="mintBtn" class="primary" disabled>Mint</button>
@@ -99,16 +109,19 @@
       </section>
 
       <section>
-        <h2>1. Pick one of yours to burn</h2>
-        <p class="muted">Burning is permanent. The burned PFP is gone for good and never returns to the pool.</p>
+        <h2>Your PFPs</h2>
+        <p class="muted">
+          Don't like one? Select it and swap: it is burned forever and you get a random unminted PFP instead.
+          A PFP you got from a swap is final and can't be swapped again.
+        </p>
         <div class="grid" id="owned"></div>
       </section>
 
       <section>
         <div class="row" style="justify-content: space-between">
           <div>
-            <h2>2. Pick an unminted one to claim</h2>
-            <p class="muted" style="margin: 0">These have never been minted. First come, first served.</p>
+            <h2>Still unminted</h2>
+            <p class="muted" style="margin: 0">What a mint or a swap could land on.</p>
           </div>
           <input type="search" id="search" placeholder="Find # id" aria-label="Find token id" />
         </div>
