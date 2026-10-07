@@ -1,163 +1,111 @@
-import { createPublicClient, createWalletClient, custom, http, parseAbi } from "https://esm.sh/viem@2.57.3";
-import { robinhood, robinhoodTestnet, foundry } from "https://esm.sh/viem@2.57.3/chains";
-import config from "./config.js";
-
-const NETWORKS = { robinhood, robinhoodTestnet, local: foundry };
-
-const params = new URLSearchParams(location.search);
-const networkKey = params.get("network") || config.network;
-const chain = NETWORKS[networkKey];
-if (!chain) {
-  const message = `Unknown network "${networkKey}". Use robinhood, robinhoodTestnet or local.`;
-  document.getElementById("toast").textContent = message;
-  throw new Error(message);
-}
-const contract = params.get("contract") || config.contractAddress;
-const rpcUrl = params.get("rpc") || config.rpcUrl || chain.rpcUrls.default.http[0];
+import { abi } from "./contract.js";
+import {
+  $,
+  connectWallet,
+  ensureChain,
+  explain,
+  loadSettings,
+  makePublicClient,
+  shortAddress,
+  toast,
+  toastLink,
+} from "./shared.js";
 
 const MAX_PER_TX = 20;
 const REVEAL_BATCH = 10;
 
-const abi = parseAbi([
-  "function name() view returns (string)",
-  "function available() view returns (uint256)",
-  "function publicMinted() view returns (uint256)",
-  "function maxPerWallet() view returns (uint256)",
-  "function totalBurned() view returns (uint256)",
-  "function totalSupply() view returns (uint256)",
-  "function mintOpen() view returns (bool)",
-  "function swapOpen() view returns (bool)",
-  "function mintedBy(address) view returns (uint256)",
-  "function pendingOf(address) view returns (uint256)",
-  "function lastRequestOf(address) view returns (uint256)",
-  "function nextToReveal() view returns (uint256)",
-  "function isRevealReady(uint256) view returns (bool)",
-  "function swappedIn(uint256) view returns (bool)",
-  "function unmintedTokenIds() view returns (uint256[])",
-  "function tokensOfOwner(address) view returns (uint256[])",
-  "function baseURI() view returns (string)",
-  "function uriSuffix() view returns (string)",
-  "function mint(uint256 quantity)",
-  "function swap(uint256[] burnIds)",
-  "function reveal(uint256 maxRequests) returns (uint256)",
-  "error MintClosed()",
-  "error SwapClosed()",
-  "error ZeroQuantity()",
-  "error TooManyPerTx()",
-  "error ExceedsWalletLimit()",
-  "error NotEnoughUnminted()",
-  "error NotTokenOwner(uint256 tokenId)",
-  "error AlreadySwapped(uint256 tokenId)",
-]);
+const settings = await loadSettings();
+const { chain, contract } = settings;
 
-const FRIENDLY_ERRORS = {
-  MintClosed: "Minting is not open right now.",
-  SwapClosed: "Swapping is not open right now.",
-  ZeroQuantity: "Pick a quantity of at least 1.",
-  TooManyPerTx: `At most ${MAX_PER_TX} per transaction.`,
-  ExceedsWalletLimit: "You have reached the per-wallet mint limit.",
-  NotEnoughUnminted: "There aren't enough unminted PFPs left for that.",
-  NotTokenOwner: "You don't own that PFP anymore.",
-  AlreadySwapped: "That PFP came from a swap, so it can't be swapped again.",
-};
-
-const publicClient = createPublicClient({ chain, transport: http(rpcUrl) });
+let publicClient;
 let walletClient;
+let provider;
 let account;
-let listening = false;
 let pollTimer = null;
+let busy = false; // a transaction is in flight; its own refresh reports the outcome
 
 const state = {
   owned: [],
   ownedLoaded: false,
   final: new Set(), // owned tokens that came from a swap
-  fresh: new Set(), // tokens that arrived since the page loaded
+  fresh: new Set(), // tokens that arrived while the page was open
   selected: new Set(),
-  pool: [],
   pending: 0n,
   mintOpen: false,
   swapOpen: false,
   mintable: 0,
   available: 0n,
 };
-const metaCache = new Map(); // id -> Promise<image url | null>
-const images = new Map(); // id -> image url, once loaded
+const metaCache = new Map(); // id -> Promise<{ thumb, full } | null>
+const loaded = new Map(); // id -> { thumb, full }, once fetched
 let base = "";
 let suffix = "";
 
-const $ = (id) => document.getElementById(id);
 const read = (functionName, args = []) => publicClient.readContract({ address: contract, abi, functionName, args });
-
-function toast(message, isError = false) {
-  const el = $("toast");
-  el.textContent = message;
-  el.className = isError ? "error" : "";
-}
-
-function toastLink(message, hash) {
-  const el = $("toast");
-  el.className = "";
-  el.textContent = message + " ";
-  const explorer = chain.blockExplorers?.default?.url;
-  if (explorer) {
-    const a = document.createElement("a");
-    a.href = `${explorer}/tx/${hash}`;
-    a.target = "_blank";
-    a.rel = "noopener";
-    a.textContent = "View transaction";
-    el.append(a);
-  }
-}
 
 // ---- metadata -------------------------------------------------------------
 
-const gateway = (uri) => (uri?.startsWith("ipfs://") ? config.ipfsGateway + uri.slice(7) : uri);
+const gateway = (uri) => (uri?.startsWith("ipfs://") ? settings.ipfsGateway + uri.slice(7) : uri);
 
-async function imageFor(id) {
-  if (!base) return null;
+/** Thumbnail and full image for a token we know exists. The metadata server only answers for minted tokens. */
+function artFor(id) {
+  if (!base) return Promise.resolve(null);
   if (!metaCache.has(id)) {
-    metaCache.set(
-      id,
-      fetch(gateway(`${base}${id}${suffix}`))
-        .then((r) => (r.ok ? r.json() : null))
-        .then((meta) => gateway(meta?.image ?? null))
-        .then((src) => {
-          if (src) images.set(id, src);
-          return src;
-        })
-        .catch(() => null),
-    );
+    const request = fetch(gateway(`${base}${id}${suffix}`))
+      .then((r) => (r.ok ? r.json() : null))
+      .then((meta) => {
+        if (!meta) {
+          metaCache.delete(id); // not there yet (just revealed, or a brief outage): try again next refresh
+          return null;
+        }
+        const art = { thumb: gateway(meta.thumbnail ?? meta.image), full: gateway(meta.image) };
+        loaded.set(id, art);
+        return art;
+      })
+      .catch(() => {
+        metaCache.delete(id);
+        return null;
+      });
+    metaCache.set(id, request);
   }
   return metaCache.get(id);
+}
+
+function showArt(cardEl, art) {
+  const pic = cardEl.querySelector(".art");
+  pic.style.backgroundImage = `url("${art.thumb}")`;
+  pic.textContent = "";
+  const link = cardEl.querySelector("a.full");
+  link.href = art.full;
+  link.hidden = false;
 }
 
 const lazyArt = new IntersectionObserver((entries) => {
   for (const entry of entries) {
     if (!entry.isIntersecting) continue;
     lazyArt.unobserve(entry.target);
-    const art = entry.target;
-    imageFor(Number(art.dataset.id)).then((src) => src && showImage(art, src));
+    const cardEl = entry.target;
+    artFor(Number(cardEl.dataset.id)).then((art) => art && showArt(cardEl, art));
   }
 });
 
-function showImage(art, src) {
-  art.style.backgroundImage = `url("${src}")`;
-  art.textContent = "";
-}
-
 // ---- rendering ------------------------------------------------------------
 
-function card(id, { tag, tagClass = "", selected = false, onClick } = {}) {
-  const el = document.createElement(onClick ? "button" : "div");
-  el.className = "card";
+function card(id, { tag = "", tagClass = "", selected = false, onClick = null } = {}) {
+  const el = document.createElement("div");
+  el.className = selected ? "card selected" : "card";
+  el.dataset.id = id;
+
+  const pic = document.createElement(onClick ? "button" : "div");
+  pic.className = "art";
+  pic.textContent = `#${id}`;
   if (onClick) {
-    el.setAttribute("aria-pressed", String(selected));
-    el.addEventListener("click", onClick);
+    pic.type = "button";
+    pic.setAttribute("aria-pressed", String(selected));
+    pic.setAttribute("aria-label", `Select #${id} to swap`);
+    pic.addEventListener("click", onClick);
   }
-  const art = document.createElement("div");
-  art.className = "art";
-  art.dataset.id = id;
-  art.textContent = `#${id}`;
+
   const label = document.createElement("div");
   label.className = "label";
   const name = document.createElement("span");
@@ -169,9 +117,17 @@ function card(id, { tag, tagClass = "", selected = false, onClick } = {}) {
     t.textContent = tag;
     label.append(t);
   }
-  el.append(art, label);
-  if (images.has(id)) showImage(art, images.get(id));
-  else lazyArt.observe(art);
+  const full = document.createElement("a");
+  full.className = "full";
+  full.textContent = "Full size";
+  full.target = "_blank";
+  full.rel = "noopener";
+  full.hidden = true;
+  label.append(full);
+
+  el.append(pic, label);
+  if (loaded.has(id)) showArt(el, loaded.get(id));
+  else lazyArt.observe(el);
   return el;
 }
 
@@ -207,21 +163,9 @@ function renderOwned() {
   }
 }
 
-function renderPool() {
-  const el = $("pool");
-  el.replaceChildren();
-  const q = $("search").value.replace(/[^0-9]/g, "");
-  const ids = q ? state.pool.filter((id) => String(id).includes(q)) : state.pool;
-  if (ids.length === 0) {
-    el.innerHTML = `<p class="muted">${state.pool.length ? "No match." : "Everything has been minted."}</p>`;
-    return;
-  }
-  for (const id of ids) el.append(card(id));
-}
-
 function renderSwapBar() {
   const n = state.selected.size;
-  $("swapbar").style.display = n ? "block" : "none";
+  $("swapbar").hidden = n === 0;
   const ids = [...state.selected].map((id) => `#${id}`).join(", ");
   $("swapText").textContent =
     `Burn ${ids} forever and get ${n === 1 ? "a random unminted PFP" : `${n} random unminted PFPs`}. ` +
@@ -231,15 +175,15 @@ function renderSwapBar() {
 }
 
 async function renderPending() {
-  const show = account && state.pending > 0n;
-  $("pending").style.display = show ? "block" : "none";
+  const show = Boolean(account) && state.pending > 0n;
+  $("pending").hidden = !show;
   if (!show) return;
   const myRequest = await read("lastRequestOf", [account]);
   const ready = await read("isRevealReady", [myRequest]);
   const n = Number(state.pending);
   $("pendingText").textContent = ready
     ? `${n} PFP${n === 1 ? " is" : "s are"} ready to reveal.`
-    : `${n} PFP${n === 1 ? " is" : "s are"} being rolled. Reveal unlocks in a few seconds.`;
+    : `${n} PFP${n === 1 ? " is" : "s are"} being rolled. Reveal unlocks in about 15 seconds.`;
   $("revealBtn").disabled = !ready;
   $("revealBtn").dataset.request = String(myRequest);
 }
@@ -247,7 +191,7 @@ async function renderPending() {
 // ---- data -----------------------------------------------------------------
 
 async function refresh() {
-  const [name, minted, available, burned, supply, mintOpen, swapOpen, perWallet, poolIds] = await Promise.all([
+  const [name, minted, available, burned, supply, mintOpen, swapOpen, perWallet] = await Promise.all([
     read("name"),
     read("publicMinted"),
     read("available"),
@@ -256,7 +200,6 @@ async function refresh() {
     read("mintOpen"),
     read("swapOpen"),
     read("maxPerWallet"),
-    read("unmintedTokenIds"),
   ]);
 
   document.title = `${name} · Mint & Swap`;
@@ -273,7 +216,6 @@ async function refresh() {
   state.mintOpen = mintOpen;
   state.swapOpen = swapOpen;
   state.available = available;
-  state.pool = poolIds.map(Number).sort((a, b) => a - b);
 
   let mintedByMe = 0n;
   let revealedMsg = "";
@@ -304,106 +246,74 @@ async function refresh() {
   const left = [walletLeft, available, BigInt(MAX_PER_TX)].reduce((a, b) => (b < a ? b : a));
   state.mintable = Number(left);
   $("qty").max = String(Math.max(1, state.mintable));
+  if (Number($("qty").value) > state.mintable) $("qty").value = String(Math.max(1, state.mintable));
   $("mintHelp").textContent = account
     ? `Random PFPs from the unminted pool, free apart from gas. You have minted ${mintedByMe} of ${perWallet}.`
     : `Random PFPs from the unminted pool, free apart from gas. Up to ${perWallet} per wallet.`;
   $("mintBtn").disabled = !(account && mintOpen && state.mintable > 0);
 
   renderOwned();
-  renderPool();
   renderSwapBar();
   await renderPending();
   if (revealedMsg) toast(revealedMsg);
   schedulePoll();
 }
 
-/** While something is waiting to be revealed, check back every few seconds (a keeper may reveal it for us). */
+/** While something is waiting to be revealed, check back every few seconds (someone else may reveal it). */
 function schedulePoll() {
   clearTimeout(pollTimer);
   if (account && state.pending > 0n) {
-    pollTimer = setTimeout(() => refresh().catch(() => schedulePoll()), 3000);
+    pollTimer = setTimeout(() => (busy ? schedulePoll() : refresh().catch(() => schedulePoll())), 4000);
   }
 }
 
 // ---- wallet & transactions -------------------------------------------------
 
-async function ensureChain() {
-  const current = await walletClient.getChainId();
-  if (current === chain.id) return;
-  try {
-    await walletClient.switchChain({ id: chain.id });
-  } catch (err) {
-    // 4902: the wallet doesn't know this chain yet
-    if (err?.code === 4902 || err?.cause?.code === 4902) {
-      await walletClient.addChain({ chain });
-    } else {
-      throw err;
-    }
-  }
-}
-
 async function connect() {
-  if (!window.ethereum) {
-    toast("No wallet found. Install a browser wallet such as MetaMask or Rabby.", true);
-    return;
-  }
-  walletClient = createWalletClient({ chain, transport: custom(window.ethereum) });
-  [account] = await walletClient.requestAddresses();
-  await ensureChain();
-  showAccount();
-  if (!listening) {
-    listening = true;
-    window.ethereum.on?.("accountsChanged", (accounts) => {
-      account = accounts[0];
-      state.owned = [];
-      state.ownedLoaded = false;
-      state.pending = 0n;
-      state.selected.clear();
-      state.fresh.clear();
-      showAccount();
-      refresh().catch((err) => toast(explain(err), true));
-    });
-  }
+  const wallet = await connectWallet(chain);
+  if (!wallet) return;
+  const sameProvider = wallet.provider === provider;
+  ({ provider, walletClient, account } = wallet);
+  $("connect").textContent = shortAddress(account);
+  if (!sameProvider) provider.on?.("accountsChanged", (accounts) => {
+    account = accounts[0];
+    state.owned = [];
+    state.ownedLoaded = false;
+    state.pending = 0n;
+    state.selected.clear();
+    state.fresh.clear();
+    $("connect").textContent = account ? shortAddress(account) : "Connect wallet";
+    refresh().catch((err) => toast(explain(err), true));
+  });
   await refresh();
-}
-
-function showAccount() {
-  $("connect").textContent = account ? `${account.slice(0, 6)}…${account.slice(-4)}` : "Connect wallet";
-}
-
-function explain(err) {
-  const reverted = err?.walk?.((e) => e?.data?.errorName);
-  const name = reverted?.data?.errorName;
-  if (name && FRIENDLY_ERRORS[name]) return FRIENDLY_ERRORS[name];
-  if (err?.walk?.((e) => e?.name === "UserRejectedRequestError")) return "Transaction cancelled.";
-  return err?.shortMessage || err?.message || String(err);
 }
 
 /** Returns true when the transaction was mined successfully. */
 async function send(functionName, args, pending, done) {
+  busy = true;
   try {
-    await ensureChain();
-    // Simulate first so reverts show a readable reason before the wallet pops up.
+    await ensureChain(walletClient, chain);
+    // Simulate first so a revert shows a readable reason before the wallet pops up.
     const { request } = await publicClient.simulateContract({ address: contract, abi, functionName, args, account });
     const hash = await walletClient.writeContract(request);
-    toastLink(pending, hash);
+    toastLink(chain, pending, hash);
     const receipt = await publicClient.waitForTransactionReceipt({ hash });
     if (receipt.status !== "success") throw new Error("Transaction failed.");
-    toastLink(done, hash);
+    toastLink(chain, done, hash);
     return true;
   } catch (err) {
     toast(explain(err), true);
     return false;
   } finally {
+    busy = false;
     await refresh().catch(() => {});
   }
 }
 
 $("connect").addEventListener("click", () => connect().catch((err) => toast(explain(err), true)));
-$("search").addEventListener("input", renderPool);
 
 $("mintBtn").addEventListener("click", async () => {
-  const qty = Math.min(Math.max(1, Number($("qty").value) || 1), state.mintable);
+  const qty = Math.min(Math.max(1, Math.floor(Number($("qty").value)) || 1), state.mintable);
   $("mintBtn").disabled = true;
   await send("mint", [BigInt(qty)], "Minting…", `Minted ${qty}! Reveal in a few seconds.`);
 });
@@ -435,10 +345,14 @@ $("revealBtn").addEventListener("click", async () => {
 
 // ---- boot -----------------------------------------------------------------
 
-if (/^0x0{40}$/.test(contract)) {
-  toast("Set the network and contractAddress in web/config.js.", true);
+if (!chain) {
+  toast(`Unknown network "${settings.network}".`, true);
+} else if (!contract) {
+  $("network").textContent = chain.name;
+  toast("This site isn't connected to a contract yet.", true);
 } else {
   $("network").textContent = chain.name;
+  publicClient = makePublicClient(chain, settings.rpcUrl);
   Promise.all([read("baseURI"), read("uriSuffix")])
     .then(([b, s]) => {
       base = b;

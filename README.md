@@ -21,7 +21,45 @@ swap:  your token    --(burned)-----> gone forever
 | `test/BurnSwapPFP.t.sol` | Foundry tests, including a full 555 mint-out, fairness checks and a fuzz test |
 | `script/Deploy.s.sol` | Deploy script, configured by env vars |
 | `script/keeper.sh` | Optional bot that reveals everyone's mints and swaps automatically |
-| `web/` | A no-build mint & swap page (plain HTML + [viem](https://viem.sh)) |
+| `web/` | No-build mint & swap page (`index.html`) and admin page (`admin.html`), plain HTML + [viem](https://viem.sh) |
+| `api/` | Vercel functions: token metadata (keeps the image map private) and site config |
+| `script/dev-server.mjs` | Runs `web/` + `api/` locally the way Vercel does |
+| `script/export-web-contract.mjs` | Copies the compiled contract into `web/contract.js` for the admin page's browser deploy |
+
+## Mooniez burn test setup
+
+The test uses the 555 inverted Mooniez hosted at `mooniez-burn-images.henryfinnai.workers.dev`. Their URLs come from a private map, `burn-test-urls.json`, which **must never be committed** (this repo is public) **or sent to browsers**: inverting an image gives back the original Mooniez, whose mint is still open.
+
+How the site keeps it private:
+
+- The map lives only on the Vercel deployment, at `private/burn-test-urls.json` (git-ignored). Static files are served from `web/` only, so `private/` is never reachable from the web.
+- The contract's metadata URL is `https://<site>/api/metadata/`. `api/metadata/[id].js` answers **only for tokens that exist on chain** (minted and not burned) and returns 404 for everything else, so unminted art never leaves the server.
+- Token ids are matched to images with a keyed shuffle (`SHUFFLE_SECRET`), so a token number says nothing about which Mooniez it shows. Mooniez ids never appear in the metadata.
+- The mint page only shows the connected wallet's own tokens (400px `.webp` thumbnails in the grid, the PNG behind "Full size"). There is no gallery of unminted art.
+
+Vercel environment variables:
+
+| Variable | Value |
+| --- | --- |
+| `NETWORK` | `robinhoodTestnet` or `robinhood` |
+| `CONTRACT_ADDRESS` | the deployed contract |
+| `SHUFFLE_SECRET` | random secret, set once. **Never change it after minting starts** or every token's image changes. |
+| `RPC_URL` | optional, a dedicated Robinhood Chain RPC |
+
+Running a test drop:
+
+1. Open `https://<site>/admin`, connect the wallet that should own the contract, pick the network and press **Deploy**.
+2. Put the new address in `CONTRACT_ADDRESS` (and the network in `NETWORK`) and redeploy the site. Until then the mint page works via `https://<site>/?network=...&contract=0x...` but shows no images.
+3. On the admin page press **Open mint**, later **Close mint** and **Open swap**.
+
+Deploys go straight from files (not from GitHub), because the map has to be included and can't be in the repo. Keep a copy of the map file: every redeploy that changes code needs it.
+
+Local run with a stand-in map: put a 555-entry `private/burn-test-urls.json` in place, start `anvil --block-time 1`, deploy (see below), then:
+
+```sh
+NETWORK=local CONTRACT_ADDRESS=0x... SHUFFLE_SECRET=dev RPC_URL=http://127.0.0.1:8545 node script/dev-server.mjs
+# http://127.0.0.1:3000/?rpc=http://127.0.0.1:8545 and /admin?network=local&rpc=http://127.0.0.1:8545
+```
 
 ## How it works
 
@@ -122,25 +160,22 @@ NFT=0xYourContract KEEPER_PRIVATE_KEY=0x... RPC=robinhood ./script/keeper.sh
 
 Without a keeper, holders reveal with the button. A request left unrevealed for about 50 minutes simply gets a fresh random block when someone does reveal it.
 
-## Web page
+## Web pages
 
-`web/` is a static page: connect a wallet, mint, reveal, select PFPs to swap. Swapped PFPs are tagged *final*. It adds/switches the wallet to Robinhood Chain automatically.
+- `web/index.html`: connect a wallet, mint, reveal, select PFPs to swap. Swapped PFPs are tagged *final*. It adds/switches the wallet to Robinhood Chain automatically and lets people pick when they have several wallet extensions.
+- `web/admin.html` (at `/admin`): deploy the contract from your own wallet and run the drop (open/close mint and swap, max per wallet, metadata URL, reveal pending). Only the owner wallet can change anything.
 
-1. Edit `web/config.js`: set `network` (`robinhood` or `robinhoodTestnet`) and `contractAddress`. Set `rpcUrl` to a dedicated RPC (Alchemy, QuickNode, etc.) before a public launch; the public one is rate limited.
-2. Host the `web/` folder anywhere static (Vercel, Netlify, IPFS, S3). Locally: `cd web && python3 -m http.server 8080`.
-
-It loads viem from esm.sh, so there is no build step.
+The pages read the network and contract from `/api/config` (the Vercel env vars), falling back to `web/config.js`; `?network=&contract=&rpc=` in the URL override both. They load viem from esm.sh, so there is no build step. After changing the contract, run `forge build && node script/export-web-contract.mjs`.
 
 ## Local end-to-end run
 
 ```sh
 anvil --block-time 1                    # terminal 1
 # terminal 2, using anvil's first dev key
-NFT_NAME="Local" NFT_SYMBOL="LOC" BASE_URI="ipfs://<cid>/" forge script script/Deploy.s.sol \
+NFT_NAME="Local" NFT_SYMBOL="LOC" BASE_URI="http://127.0.0.1:3000/api/metadata/" forge script script/Deploy.s.sol \
   --rpc-url http://127.0.0.1:8545 --broadcast \
   --private-key 0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80
-cd web && python3 -m http.server 8080
-# open http://127.0.0.1:8080/?network=local&contract=<address>&rpc=http://127.0.0.1:8545
+# then start script/dev-server.mjs as shown in "Mooniez burn test setup"
 ```
 
 ## Things to know before launch

@@ -10,3 +10,6 @@ broadcast/**/dry-run/
 # Misc
 node_modules/
 .DS_Store
+
+# Private Mooniez image map (see README). Never commit.
+private/

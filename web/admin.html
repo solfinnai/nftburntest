@@ -1,0 +1,73 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex" />
+    <title>Admin · Mint &amp; Swap</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <h1>Admin</h1>
+          <div class="row muted">
+            <label class="row">Network
+              <select id="network" aria-label="Network">
+                <option value="robinhoodTestnet">Robinhood Chain Testnet</option>
+                <option value="robinhood">Robinhood Chain (mainnet)</option>
+              </select>
+            </label>
+            <a href="./" id="mintLink">Mint page</a>
+          </div>
+        </div>
+        <button id="connect" class="primary">Connect wallet</button>
+      </header>
+
+      <div id="toast" role="status" aria-live="polite"></div>
+
+      <section>
+        <h2>1. Deploy the contract</h2>
+        <p class="muted">
+          Your connected wallet pays the gas (well under a dollar) and becomes the owner. Mint and swap start closed.
+        </p>
+        <div class="form">
+          <label class="field">Name <input id="dName" value="Mooniez Burn Test" /></label>
+          <label class="field">Symbol <input id="dSymbol" value="MOONBT" /></label>
+          <label class="field">Max per wallet <input id="dMax" type="number" min="1" value="10" /></label>
+          <label class="field">Metadata URL <input id="dBase" /></label>
+        </div>
+        <button id="deployBtn" class="primary" disabled>Deploy</button>
+        <div id="deployResult" class="result" hidden></div>
+      </section>
+
+      <section>
+        <h2>2. Run the drop</h2>
+        <div class="row">
+          <input id="address" placeholder="Contract address 0x…" aria-label="Contract address" size="44" />
+          <button id="loadBtn">Load</button>
+        </div>
+        <div id="status" hidden>
+          <div class="kv" id="kv"></div>
+          <p class="muted" id="ownerNote"></p>
+          <div class="row">
+            <button id="mintToggle"></button>
+            <button id="swapToggle"></button>
+            <button id="revealBtn">Reveal pending</button>
+          </div>
+          <div class="form">
+            <label class="field">Max per wallet
+              <span class="row"><input id="maxInput" type="number" min="0" /><button id="maxBtn">Save</button></span>
+            </label>
+            <label class="field">Metadata URL
+              <span class="row"><input id="baseInput" /><button id="baseBtn">Save</button></span>
+            </label>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="./admin.js"></script>
+  </body>
+</html>

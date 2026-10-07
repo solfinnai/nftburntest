@@ -1,0 +1,10 @@
+{
+  "name": "mooniez-burn-test",
+  "private": true,
+  "type": "module",
+  "engines": { "node": "22.x" },
+  "scripts": {
+    "dev": "node script/dev-server.mjs",
+    "export-contract": "node script/export-web-contract.mjs"
+  }
+}

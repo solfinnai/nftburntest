@@ -4,69 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Mint &amp; Swap</title>
-    <style>
-      :root {
-        --bg: #0d0f12;
-        --panel: #161a20;
-        --line: #262c35;
-        --text: #e9edf2;
-        --muted: #8c96a3;
-        --accent: #c3f53c;
-        --accent-ink: #11140a;
-        --danger: #ff6b5b;
-        --radius: 14px;
-      }
-      * { box-sizing: border-box; }
-      body {
-        margin: 0;
-        background: var(--bg);
-        color: var(--text);
-        font: 15px/1.5 ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-      }
-      main { max-width: 1100px; margin: 0 auto; padding: 24px 16px 140px; }
-      header { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
-      h1 { margin: 0; font-size: 24px; letter-spacing: -0.01em; }
-      h2 { margin: 0 0 4px; font-size: 18px; }
-      .muted { color: var(--muted); }
-      .badge { font-size: 12px; padding: 3px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); }
-      .badge.on { color: var(--accent); border-color: var(--accent); }
-      button {
-        font: inherit; cursor: pointer; border-radius: 10px; border: 1px solid var(--line);
-        background: var(--panel); color: var(--text); padding: 9px 16px;
-      }
-      button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 600; }
-      button.danger { background: var(--danger); color: #1a0703; border-color: var(--danger); font-weight: 600; }
-      button:disabled { opacity: 0.45; cursor: not-allowed; }
-      section { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-top: 18px; }
-      .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; }
-      .stat b { display: block; font-size: 22px; }
-      .row { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(110px, 1fr)); gap: 10px; margin-top: 12px; }
-      .grid > p { grid-column: 1 / -1; margin: 0; }
-      .card {
-        padding: 0; overflow: hidden; text-align: left; border-radius: 12px; background: #0f1216;
-        display: flex; flex-direction: column;
-      }
-      .card .art { aspect-ratio: 1; width: 100%; background: #1c2128 center/cover no-repeat; display: grid; place-items: center; color: var(--muted); font-size: 13px; }
-      .card .label { padding: 6px 8px; font-size: 13px; }
-      .card[aria-pressed="true"] { outline: 3px solid var(--danger); outline-offset: -3px; }
-      .card .label { display: flex; justify-content: space-between; gap: 6px; }
-      .tag { font-size: 11px; color: var(--muted); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; }
-      .tag.new { color: var(--accent); border-color: var(--accent); }
-      #pending { display: none; border-color: var(--accent); }
-      input[type="search"], input[type="number"] {
-        font: inherit; color: var(--text); background: #0f1216; border: 1px solid var(--line); border-radius: 10px; padding: 8px 10px;
-      }
-      input[type="number"] { width: 80px; }
-      #swapbar {
-        position: fixed; left: 0; right: 0; bottom: 0; background: #11151a; border-top: 1px solid var(--line);
-        padding: 14px 16px; display: none;
-      }
-      #swapbar .inner { max-width: 1100px; margin: 0 auto; display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
-      #toast { margin-top: 12px; min-height: 1.5em; }
-      #toast.error { color: var(--danger); }
-      a { color: var(--accent); }
-    </style>
+    <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <main>
@@ -93,7 +31,7 @@
         </div>
       </section>
 
-      <section id="pending">
+      <section id="pending" class="highlight" hidden>
         <h2>Rolling the dice…</h2>
         <p class="muted" id="pendingText"></p>
         <button id="revealBtn" class="primary" disabled>Reveal</button>
@@ -103,7 +41,7 @@
         <h2>Free mint</h2>
         <p class="muted" id="mintHelp">Random PFPs from the unminted pool, free apart from gas.</p>
         <div class="row">
-          <input type="number" id="qty" min="1" value="1" aria-label="Quantity" />
+          <input type="number" id="qty" min="1" value="1" aria-label="How many to mint" />
           <button id="mintBtn" class="primary" disabled>Mint</button>
         </div>
       </section>
@@ -116,20 +54,9 @@
         </p>
         <div class="grid" id="owned"></div>
       </section>
-
-      <section>
-        <div class="row" style="justify-content: space-between">
-          <div>
-            <h2>Still unminted</h2>
-            <p class="muted" style="margin: 0">What a mint or a swap could land on.</p>
-          </div>
-          <input type="search" id="search" placeholder="Find # id" aria-label="Find token id" />
-        </div>
-        <div class="grid" id="pool"></div>
-      </section>
     </main>
 
-    <div id="swapbar">
+    <div id="swapbar" hidden>
       <div class="inner">
         <span id="swapText"></span>
         <button id="swapBtn" class="danger">Burn &amp; swap</button>
