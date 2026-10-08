@@ -1,7 +1,7 @@
 // Server-side settings, all from Vercel environment variables.
 //   NETWORK            robinhood | robinhoodTestnet | local
 //   CONTRACT_ADDRESS   the BurnSwapPFP contract this site serves
-//   SHUFFLE_SECRET     random secret that decides which image each token id gets (never change it after minting)
+//   IMAGE_MAP          the packed private image map (see api/_lib/images.js)
 //   RPC_URL            optional, overrides the network's public RPC
 
 const PUBLIC_RPCS = {
@@ -17,7 +17,6 @@ export function settings() {
     network,
     contract: /^0x[0-9a-fA-F]{40}$/.test(contract) ? contract : "",
     rpcUrl: process.env.RPC_URL || PUBLIC_RPCS[network],
-    shuffleSecret: process.env.SHUFFLE_SECRET || "",
   };
 }
 

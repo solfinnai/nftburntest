@@ -1,8 +1,8 @@
 // Local stand-in for Vercel: serves web/ and runs the api/ functions.
 //
-//   NETWORK=local CONTRACT_ADDRESS=0x... SHUFFLE_SECRET=dev RPC_URL=http://127.0.0.1:8545 node script/dev-server.mjs
+//   NETWORK=local CONTRACT_ADDRESS=0x... IMAGE_MAP_FILE=private/image-map.txt RPC_URL=http://127.0.0.1:8545 node script/dev-server.mjs
 //
-// The image map is read from private/burn-test-urls.json, exactly like on Vercel.
+// IMAGE_MAP_FILE stands in for the IMAGE_MAP environment variable used on Vercel.
 import { createServer } from "node:http";
 import { readFile } from "node:fs/promises";
 import { extname, join, normalize } from "node:path";

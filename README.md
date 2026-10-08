@@ -25,6 +25,7 @@ swap:  your token    --(burned)-----> gone forever
 | `api/` | Vercel functions: token metadata (keeps the image map private) and site config |
 | `script/dev-server.mjs` | Runs `web/` + `api/` locally the way Vercel does |
 | `script/export-web-contract.mjs` | Copies the compiled contract into `web/contract.js` for the admin page's browser deploy |
+| `script/pack-image-map.mjs` | Packs the private Mooniez image map into the `IMAGE_MAP` environment variable |
 
 ## Mooniez burn test setup
 
@@ -32,32 +33,41 @@ The test uses the 555 inverted Mooniez hosted at `mooniez-burn-images.henryfinna
 
 How the site keeps it private:
 
-- The map lives only on the Vercel deployment, at `private/burn-test-urls.json` (git-ignored). Static files are served from `web/` only, so `private/` is never reachable from the web.
+- The map is packed into the Vercel environment variable `IMAGE_MAP` (encrypted at rest, only readable by the server functions). The raw file only ever lives in the git-ignored `private/` folder.
 - The contract's metadata URL is `https://<site>/api/metadata/`. `api/metadata/[id].js` answers **only for tokens that exist on chain** (minted and not burned) and returns 404 for everything else, so unminted art never leaves the server.
-- Token ids are matched to images with a keyed shuffle (`SHUFFLE_SECRET`), so a token number says nothing about which Mooniez it shows. Mooniez ids never appear in the metadata.
+- Token ids are matched to images with a keyed shuffle, so a token number says nothing about which Mooniez it shows. Mooniez ids never appear in the metadata.
 - The mint page only shows the connected wallet's own tokens (400px `.webp` thumbnails in the grid, the PNG behind "Full size"). There is no gallery of unminted art.
+
+Packing the map (writes only into `private/`):
+
+```sh
+node script/pack-image-map.mjs private/burn-test-urls.json
+# -> private/image-map.txt (the IMAGE_MAP value), private/token-to-mooniez.csv, private/shuffle-secret.txt
+```
+
+Keep `shuffle-secret.txt`: re-packing with the same secret gives the same assignment (`SHUFFLE_SECRET=<it> node script/pack-image-map.mjs ...`). Never change the assignment once tokens are minted, or their images change.
 
 Vercel environment variables:
 
 | Variable | Value |
 | --- | --- |
+| `IMAGE_MAP` | contents of `private/image-map.txt` |
 | `NETWORK` | `robinhoodTestnet` or `robinhood` |
 | `CONTRACT_ADDRESS` | the deployed contract |
-| `SHUFFLE_SECRET` | random secret, set once. **Never change it after minting starts** or every token's image changes. |
 | `RPC_URL` | optional, a dedicated Robinhood Chain RPC |
+
+Hosting: import this repo at vercel.com/new (no build settings needed, `vercel.json` covers them), add the variables above, deploy.
 
 Running a test drop:
 
 1. Open `https://<site>/admin`, connect the wallet that should own the contract, pick the network and press **Deploy**.
-2. Put the new address in `CONTRACT_ADDRESS` (and the network in `NETWORK`) and redeploy the site. Until then the mint page works via `https://<site>/?network=...&contract=0x...` but shows no images.
+2. Set `CONTRACT_ADDRESS` (and `NETWORK`) to the new contract and redeploy the site. Until then the mint page works via `https://<site>/?network=...&contract=0x...` but shows no images.
 3. On the admin page press **Open mint**, later **Close mint** and **Open swap**.
 
-Deploys go straight from files (not from GitHub), because the map has to be included and can't be in the repo. Keep a copy of the map file: every redeploy that changes code needs it.
-
-Local run with a stand-in map: put a 555-entry `private/burn-test-urls.json` in place, start `anvil --block-time 1`, deploy (see below), then:
+Local run with a stand-in map: pack a 555-entry map as above, start `anvil --block-time 1`, deploy (see below), then:
 
 ```sh
-NETWORK=local CONTRACT_ADDRESS=0x... SHUFFLE_SECRET=dev RPC_URL=http://127.0.0.1:8545 node script/dev-server.mjs
+NETWORK=local CONTRACT_ADDRESS=0x... IMAGE_MAP_FILE=private/image-map.txt RPC_URL=http://127.0.0.1:8545 node script/dev-server.mjs
 # http://127.0.0.1:3000/?rpc=http://127.0.0.1:8545 and /admin?network=local&rpc=http://127.0.0.1:8545
 ```
 

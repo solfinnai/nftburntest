@@ -12,12 +12,12 @@ export async function GET(request) {
   const tokenId = match ? Number(match[1]) : 0;
   if (!Number.isInteger(tokenId) || tokenId < 1 || tokenId > SUPPLY) return json(404, { error: "Unknown token" }, 3600);
 
-  const { contract, rpcUrl, shuffleSecret } = settings();
+  const { contract, rpcUrl } = settings();
   if (!contract) return json(503, { error: "The site is not connected to a contract yet" });
 
   let images;
   try {
-    images = loadImages(shuffleSecret);
+    images = loadImages();
   } catch (err) {
     return json(503, { error: err.message });
   }

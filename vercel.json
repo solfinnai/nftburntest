@@ -2,9 +2,6 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "outputDirectory": "web",
   "cleanUrls": true,
-  "functions": {
-    "api/**/*.js": { "includeFiles": "private/**" }
-  },
   "headers": [
     {
       "source": "/(.*)",
